@@ -1,0 +1,101 @@
+import torch
+import torch.nn as nn
+import cv2
+import numpy as np
+
+# -------------------------------
+# Step 1: Define CNN Model
+# -------------------------------
+class CNN_MODEL(nn.Module):
+    def __init__(self, input_features: int, output_features: int):
+        super().__init__()
+        self.layer_0 = nn.Sequential(
+            nn.Conv2d(in_channels=input_features, out_channels=32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=128, out_channels=10, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_features=10 * 7 * 7, out_features=output_features)
+        )
+
+    def forward(self, x):
+        x = self.layer_0(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        return x
+
+
+# -------------------------------
+# Step 2: Load trained model
+# -------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+model = CNN_MODEL(input_features=1, output_features=10).to(device)
+model.load_state_dict(torch.load("model_pytorch.pth", map_location=device))
+model.eval()
+
+# -------------------------------
+# Step 3: Setup Webcam/Video
+# -------------------------------
+cap = cv2.VideoCapture(0)  # Or "video.mp4"
+
+print("Press 'q' to quit.")
+
+# -------------------------------
+# Step 4: Real-time Detection
+# -------------------------------
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.threshold(blur, 90, 255, cv2.THRESH_BINARY_INV)[1]
+
+    # Find contours (potential digits)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        if w >= 10 and h >= 10:  # filter noise
+            roi = thresh[y:y + h, x:x + w]
+
+            # Resize to 28x28
+            roi_resized = cv2.resize(roi, (28, 28), interpolation=cv2.INTER_AREA)
+
+            # Convert to tensor
+            img_tensor = torch.from_numpy(roi_resized).float().unsqueeze(0).unsqueeze(0).to(device) / 255.0
+
+            with torch.no_grad():
+                logits = model(img_tensor)
+                probs = nn.Softmax(dim=1)(logits)
+                conf, pred = torch.max(probs, 1)
+
+            # Draw prediction
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(frame, f"{pred.item()} ({conf.item():.2f})",
+                        (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    cv2.imshow("Real-Time Digit Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+# -------------------------------
+# Step 5: Cleanup
+# -------------------------------
+cap.release()
+cv2.destroyAllWindows()
